@@ -1,0 +1,69 @@
+
+name: RDP - Windows Cloud
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 300
+
+    steps:
+      - name: Verificar ambiente Windows
+        shell: pwsh
+        run: |
+          Write-Host "Sistema operacional:"
+          Get-ComputerInfo |
+            Select-Object WindowsProductName, WindowsVersion
+
+      - name: Configurar RDP com segurança
+        shell: pwsh
+        run: |
+          $rdp = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+
+          Set-ItemProperty -Path $rdp `
+            -Name fDenyTSConnections -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup `
+            "Remote Desktop" -ErrorAction SilentlyContinue
+
+          Write-Host "Configuração RDP concluída."
+
+      - name: Verificar Tailscale
+        shell: pwsh
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest $url -OutFile $installer
+
+          Start-Process msiexec.exe `
+            -ArgumentList "/i `"$installer`" /quiet /norestart" `
+            -Wait
+
+      - name: Verificar conexão privada
+        shell: pwsh
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          if (-not $env:TS_AUTHKEY) {
+            throw "Configure o segredo TAILSCALE_AUTH_KEY."
+          }
+
+          $exe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          & $exe up --authkey=$env:TS_AUTHKEY `
+            --hostname="github-windows-$env:GITHUB_RUN_ID"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Falha ao conectar ao Tailscale."
+          }
+
+          & $exe ip -4
+
+      - name: Finalizar ambiente
+        shell: pwsh
+        run: |
+          Write-Host "Ambiente Windows configurado."
+          Write-Host "Finalizando execução."
