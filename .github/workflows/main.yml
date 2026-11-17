@@ -1,0 +1,133 @@
+
+name: RDP - VPS Window10
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Configure Remote Desktop
+        shell: pwsh
+        run: |
+          $path = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+
+          Set-ItemProperty -Path $path `
+            -Name fDenyTSConnections -Value 0
+
+          $rdpPath = "$path\WinStations\RDP-Tcp"
+
+          Set-ItemProperty -Path $rdpPath `
+            -Name UserAuthentication -Value 1
+
+          Set-ItemProperty -Path $rdpPath `
+            -Name SecurityLayer -Value 2
+
+          New-NetFirewallRule `
+            -DisplayName "RDP-Tailscale-Only" `
+            -Direction Inbound `
+            -Protocol TCP `
+            -LocalPort 3389 `
+            -RemoteAddress 100.64.0.0/10 `
+            -Action Allow
+
+          Start-Service TermService
+
+      - name: Create RDP User
+        shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          if (-not $env:RDP_PASSWORD) {
+            throw "Configure o secret RDP_PASSWORD"
+          }
+
+          $password = ConvertTo-SecureString `
+            $env:RDP_PASSWORD -AsPlainText -Force
+
+          if (Get-LocalUser -Name "RDPUser" `
+              -ErrorAction SilentlyContinue) {
+            Set-LocalUser -Name "RDPUser" -Password $password
+          } else {
+            New-LocalUser `
+              -Name "RDPUser" `
+              -Password $password `
+              -AccountNeverExpires
+          }
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "RDPUser" `
+            -ErrorAction SilentlyContinue
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest -Uri $url -OutFile $installer
+
+          Start-Process msiexec.exe `
+            -ArgumentList "/i `"$installer`" /quiet /norestart" `
+            -Wait
+
+          Remove-Item $installer -Force
+
+      - name: Connect Tailscale
+        shell: pwsh
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          if (-not $env:TS_AUTHKEY) {
+            throw "Configure TAILSCALE_AUTH_KEY"
+          }
+
+          $exe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          $connected = $false
+
+          for ($i = 0; $i -lt 20; $i++) {
+            if (Test-Path $exe) {
+              $connected = $true
+              break
+            }
+            Start-Sleep -Seconds 3
+          }
+
+          if (-not $connected) {
+            throw "Tailscale não foi instalado"
+          }
+
+          & $exe up "--authkey=$env:TS_AUTHKEY" `
+            "--hostname=github-windows-$env:GITHUB_RUN_ID"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Falha na conexão Tailscale"
+          }
+
+          $ip = & $exe ip -4
+
+          if (-not $ip) {
+            throw "IP Tailscale não encontrado"
+          }
+
+          Write-Host "Tailscale conectado."
+          Write-Host "IP: $ip"
+          Write-Host "Usuário RDP: RDPUser"
+
+      - name: Verify RDP
+        shell: pwsh
+        run: |
+          $service = Get-Service TermService
+
+          Write-Host "RDP Service: $($service.Status)"
+
+          if ($service.Status -ne "Running") {
+            throw "Serviço RDP não está ativo"
+          }
+
+          Write-Host "Configuração concluída."
